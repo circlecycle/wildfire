@@ -1,0 +1,433 @@
+<wfx>
+    <!-- ### NODE ########################################################################################### -->
+    
+    <class name="node" extends="none">
+        <import name="wildfire.Helpers" as="Helpers"/>
+        <import name="re"/>
+        <import name="">
+        
+        <global name="node_constraints_accumulator_" type="expression" value="[]"/>
+        <global name="node_inits_accumulator_" type="expression" value="[]"/>
+        <global name="node_uidcount_" type="expression" value="0"/>
+        
+        <attribute name="node_constraint_regex_" value="re.compile('^.*\$\{.*\}$')"/>
+        <attribute name="node_once_constraint_regex_" value="re.compile('^.*\$\once{.*\}$')"/>
+        <attribute name="node_attr_defaults_" type="expression" value="{'eval':0, 'float':0.0, 'str':''}"/>
+        
+        <method name="__init__" args="parent=None, attrs={}, topmostnode=True">
+            global node_inits_accumulator_, node_attr_defaults_, application
+            
+            if topmostnode and not application:
+                application = self
+                
+            #SubElement Setup
+            self.__dict__['self'] = self
+            self.__dict__['parent'] = parent
+            self.__dict__['application'] = application
+            self.__dict__['childNodes'] = []
+            self.__dict__['constraints_'] = {}
+            self.__dict__['classname'] = self.__class__.__name__
+            
+            #initialization events setup
+            self.__dict__['early'] = False
+            self.__dict__['init'] = False
+            self.__dict__['late'] = False
+            self.__dict__['focus'] = False
+            
+            #Copy over all the name attributes from the attrs onto the class
+            #and if there is a default don't forget to cast it from that source!'
+            for key in attrs.keys():
+                if self.attrtypes_.has_key(key) and type(attrs[key]) == type(""):
+                    #make a function that takes attrtypes and casts them
+                    typeof = self.attrtypes_[key]
+                    
+                    if attrs[key] == None: 
+                        attrs[key] = node_attr_defaults_[typeof]
+                                        
+                    #make an expression from a string
+                    if typeof in ['expression', 'eval']:
+                        self[key] = eval(attrs[key])
+
+                    #make an float from text
+                    elif typeof in ['number', 'float']:
+                        self[key] = float(`attrs[key]`)
+
+                    #make an string from text
+                    elif typeof in ['string', 'str']:
+                        self[key] = str(attrs[key])
+                else:
+                    self.__dict__[key] = attrs[key]
+                    
+            #scan attributes for constraints to interpret
+            self.initConstraints_()
+        
+            #Node setup
+            self.__construct__()
+            self.__objectgraph__()
+            
+            #node is finished, add the node to a list that get init events wherein the
+            #order added gives the correct evaluation order naturally.
+            node_inits_accumulator_.append(self)
+
+            if self.classname != 'application_':
+              self.touch('childNodes')
+
+            #if this is the canvas (or the topmostnode of a parse operation), finish up by
+            #sending out all init events and finally evaluating all collected constraints.
+            if topmostnode:
+              self.sendInits_()
+        </method>
+        
+        <!-- A stub for execution. subclasses override this method -->
+        	
+        <method name="__construct__">
+            pass
+        </method>
+        
+        <method name="sendInits_">
+            """I issue all early, init, constraint, late events from global accumlation buffers.
+               note that i am only called at the top of any create action, not at every node init!
+            """
+            global node_inits_accumulator_
+
+            #use a copy so that other node calls can start building their own chains!
+            toinit = node_inits_accumulator_[:]
+            node_inits_accumulator_ = []
+
+            ##do all the outstanding early actions
+            [setattr(node, 'early', True) for node in toinit]  
+
+            ##do all the outstanding inits
+            [setattr(node, 'init', True) for node in toinit]  
+
+            #now that init statements have been run do the constraints:
+            self.evaluateConstraints_()
+
+            #and the things for late (after everything has inited)
+            [setattr(node, 'late', True) for node in toinit]
+        </method>
+        
+        <method name="initConstraints_">
+            """ for each string attribute on this tag, find and later process any constraints that exist """
+            global node_constraints_accumulator_
+            
+            for key in self.__dict__.keys():
+                if type(self[key]) is type(""):
+                    #found always-on constraint, add to processor
+                    if self.node_constraint_regex_.search(self[key]):
+                        node_constraints_accumulator_.append([self, (key, self[key][2:-1], "always")])
+
+                    #found init time only constraint, add to processor
+                    elif self.node_once_constraint_regex_.search(self[key]):
+                        node_constraints_accumulator_.append([self, (key, self[key][6:-1], "once")])
+        </method>
+        
+        <method name="evaluateConstraints_">
+            """ when a constraint is detected it is added to singleton list without any action
+                being taken. After the first stage of initialization, go back and give all those
+                constraints values (now that everything exists)
+            """
+            global node_constraints_accumulator_
+            
+            #save then erase 'em pending the next round.    
+            constraints = node_constraints_accumulator_[:]
+            node_constraints_accumulator_ = []
+
+            for constraintTuple in constraints:
+              node, constraint = constraintTuple
+              #get the constraint info
+              attr, entry, ofType = constraint
+              
+              #split it into form one and form two parts
+              entry = entry.split('->')
+
+              #if they only provide the shortened form double into long form aka ${parent.x->parent.x}
+              if len(entry) > 1:  watch, perform = entry
+              else:               watch, perform = entry[0], entry[0]
+
+              #make a constraint (or multiple constraints!!) using the normal "always" syntax
+              if ofType == "always":
+                pathsToCheck = []
+                #handle form one
+                constraintPaths = [x.strip() for x in watch.split(',') if x]
+                for constraintPath in constraintPaths:
+                  fullpath = constraintPath.split('.')
+                  target, path = fullpath[-1], '.'.join(fullpath[:-1])
+                  pathsToCheck.append([path, target])
+
+                #for each constraint make a new function to handle it
+                for constraintPath in pathsToCheck:
+                  path, target = constraintPath
+                  #resolve the object
+                  obj = eval(path, node.__dict__)
+                  #if its a direct method link, set it
+                  #make the function in the node's namespace'
+                  funcname = "_dele_%s_%s"%(path.replace('.', '_'), target)
+                  funcbody = "def %s(value): self.%s = %s"%(funcname, attr, perform)
+                  #make the function and make a constraint to it
+                  exec funcbody in node.__dict__
+                  obj.constrain(attr=target, func=node.__dict__[funcname], set=True)
+
+              #make a constraint, this one is for once (don't make a constraint)
+              elif ofType == "once":
+                setattr(node, attr, eval(watch, node.__dict__))
+        </method>
+        
+        <method name="constrain" args="attr=None, func=None, set=False">
+            """ make a constraint, that is, add to constraints_ on a target node a pointer
+                to a function to call when it value changes. Setting set to 
+                true (the default) also sets that value on the node. This is because
+                before the init is completed, there may not be value to set!
+            """
+            
+            #place a pointer to this new function as a listener on the node pointed to by the handler
+            if not self.constraints_.has_key(attr):
+                self.__dict__['constraints_'][attr] = []
+            self.__dict__['constraints_'][attr].append(func)
+
+            #if the constraint is made after initialization, set its value immediately from the target
+            if set: func(self[attr])
+        </method>
+        
+        <method name="touch" args="attr">
+            """ set off the constraints for a given attribute without changing 
+                it's value (self.x = self.x would be similar.)
+            """
+            #distribute this value to all other listeners for this attribute
+            if self.constraints_.has_key(attr):
+              [listener(self[attr]) for listener in self.handlers_[attr]]
+        </method>
+        
+        <method name="__getitem__" args="attr">
+            """make it possible to get interior nodes dictionary style"""
+            return getattr(self, attr, None)
+        </method>
+
+        <method name="__setitem__" args="attr, val">
+            """make it possible to set interior nodes dictionary style"""
+            setattr(self, attr, val)
+        </method>
+        
+        <method name="__setattr__" args="attr, value">
+            """ and.. the very heart of delegates, events, constraints, etc! """
+            self.__dict__[attr] = value
+
+            #distribute this value to all other listeners for this attribute
+            if self.constraints_.has_key(attr):
+              [listener(value) for listener in self.constraints_[attr]]
+        </method>
+        
+        <method name="animate" args="attrname, to, dur">
+            """stub that creates and returns a new Animator object for this node 
+               the animator object automatically registers with the animation
+               event loop. 
+            """
+            return Animation.Animator(self, attrname, self[attrname], to, dur)
+        </method>
+            
+    </class>
+    
+    <!-- ### ATTRIBUTE ########################################################################################### -->
+    
+    <class name="attribute">
+        <attribute name="name" type="string"/>
+        <attribute name="type" type="string" value="expression"/>
+        <attribute name="value" type="string"/>
+        <method name="__construct__">
+          <![CDATA[
+                types = {'expression':None, 'number':float, 'string':str}
+                
+                if not self['value']: 
+                    self['value'] = "None"
+                
+                #get the right type of casting for attribute type
+                if type(self.value) == type(""):
+                    typeof = types[self.type]
+                
+                #if we have a value already use that
+                if self.parent[self.name]:
+                    self.value = self.parent[self.name]
+                
+                #cast 
+                if self.type == 'expression':
+                    value = self.value
+                    if type(self.value) == type(""):
+                        value = eval(str(self.value))
+                else:
+                    value = typeof(self.value)
+                
+                #assign the casted value to the parent
+                self.parent[self.name] = value
+                ]]>
+        </method>
+    </class>
+    
+    <!-- ### METHOD ########################################################################################### -->
+    
+    <class name="method">
+        <attribute name="name" type="string"/>
+        <attribute name="args" type="string" value="val=False"/>
+        
+        <method name="__construct__">
+            <![CDATA[
+                #extract, contain, and properly indent python content
+                if self.args is None: self.args = ''
+                script = ["def %s(%s):"%(self.name, self.args)]
+                script.extend( ["    %s"%(x) for x in Helpers.normalizeScript(self.text).split('\n')] )
+                script = "\n".join(script)
+                
+                #run the code (which will define a function where we need it)
+                try:  exec script in self.parent.__dict__
+                except Exception, msg: raise Exception("bad syntax in python block:\n %s" % msg)
+            ]]>
+        </method>
+    </class>
+    
+    <!-- ### HANDLER ########################################################################################### -->
+    
+    <class name="handler">
+        <attribute name="on" type="string"/>
+        <attribute name="reference" type="expression"/>
+        <attribute name="delegate" type="expression" value="False"/>
+        <attribute name="set" type="expression" value="False"/>
+        
+        <method name="__construct__">
+            <![CDATA[
+                """make a reference method that we can use to evaluate referenced nodes
+                """
+                global node_uidcount_
+                 
+                #make a function to respond to the event on the parent if no delegate provided
+                if not self.delegate:
+                    self.funcname = self['name'] or "_%s_%s"%(self.on, node_uidcount_)
+                    node_uidcount_ += 1
+                    args = self['args'] or "value"
+                
+                    script = ["def %s(%s):"%(self.funcname, args)]
+                    script.extend( ["    %s"%(x) for x in Helpers.normalizeScript(self.text).split('\n')] )
+                    script = '\n'.join(script)
+                
+                    #run the code (which will define a function where we need it)
+                    try:  exec script in self.parent.__dict__
+                    except Exception, msg: raise "bad syntax in python block\n\n"+`msg`
+                
+                #if a reference is given adjust the target to that, otherwise use the parent per normal
+                if self['reference']:
+                    self.parent.constrain(attr='early', func=self._reference)
+                else:
+                    self.parent.constrain(attr=self.on, func=(self.delegate or self.parent.__dict__[self.funcname]), set=self.set )
+            ]]>
+        </method>
+        
+        <method name="_reference" args="val=False">
+            target = eval(self.reference, self.parent.__dict__)
+            target.constrain(attr=self.on, func=(self.delegate or self.parent.__dict__[self.funcname]))
+        </method>
+        
+    </class>
+    
+    <class name="view">
+        <attribute name="visible" type="expression" value="True"/>
+        <attribute name="transparent" type="expression" value="True"/>
+        <attribute name="opacity" type="number" value="0"/>
+        <attribute name="bgcolor" type="string" value="white"/>
+        <attribute name="x" type="number" value="0"/>
+        <attribute name="y" type="number" value="0"/>
+        <attribute name="width" type="number" value="0"/>
+        <attribute name="height" type="number" value="0"/>
+        <attribute name="focusable" type="expression" value="True"/>
+        <attribute name="image" type="expression"/>
+        <attribute name="aligned" type="string" value="right"/>
+        <attribute name="sizing" type="string" value="auto"/>
+        
+        <method name="__init__">
+            # if color is absent, the view is transparent (which is 
+            # different then visible, which hides children too)
+            self.compute_transparency_()
+        </method>
+        
+        <handler on="init">
+            if 'once' in self.sizing or 'skip' in self.sizing:
+              self.computeSize_()
+        </handler>
+        
+        <handler on="late">
+            #use the aligned attribute to set up constraints that vertically or horizontally center the view
+            if self.aligned:
+              #if the view is aligned horizontally "center"
+              if 'center' in self.aligned:
+                self.parent.constrain(attr="width", func=self.center_, set=True)
+
+              #if the view is aligned vertically "middle"
+              if 'middle' in self.aligned:
+                self.parent.constrain(attr="height", func=self.middle_, set=True)
+        </handler>
+        
+        <method name="getLayer">
+            return self.parent.childViews.index(self)
+        </method>
+        
+        <method name="setLayer">
+            del self.parent.childViews[self.parent.childViews.index(self)]
+            self.parent.childViews.insert(position, self)
+            self.parent.touch('childViews')
+        </method>
+        
+        <method name="bringToFront">
+            <![CDATA[
+                if self.parent.childViews.index(self) < len(self.parent.childViews) - 1:
+                  del self.parent.childViews[self.parent.childViews.index(self)]
+                  self.parent.childViews.append(self)
+                  self.parent.touch('childViews')
+            ]]> 
+        </method>
+        
+        <method name="sendToBack">
+            if self.parent.childViews.index(self) > 0:
+              del self.parent.childViews[self.parent.childViews.index(self)]
+            self.parent.childViews.insert(0, self)
+            self.parent.touch('childViews')
+        </method>
+        
+        <method name="computeSize_" args="val=False">
+            w = self.getWidth()
+            if self.width != w: self.width = w
+            h = self.getHeight()
+            if self.height != h: self.height = h
+        </method>
+        
+        <method name="getWidth">
+            return [v.x+v.width for v in self.childViews if v.sizing != 'skip']
+        </method>
+        
+        <method name="getHeight">
+            views = [v.y+v.height for v in self.childViews if v.sizing != 'skip']
+            if views: return max(views)
+            else:     return self.height
+        </method>
+
+        <method name="compute_transparency_" args="val=False">
+            if self['bgcolor'] or self['image']: 
+              self.transparent = False
+            else:
+              self.transparent = True
+        </method>
+        
+        <method name="center_">
+            self.x = (self.parent.width/2)-(self.width/2)
+        </method>
+        
+        <method name="middle_">
+            self.y = (self.parent.height/2)-(self.height/2)
+        </method>
+        
+        <method name="absx" args="x">
+            return x - self.parent.absX_
+        </method>
+        
+        <method name="absy" args="y">
+            return y - self.parent.absY_
+        </method>
+    </class>
+
+</wfx>

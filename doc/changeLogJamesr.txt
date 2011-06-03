@@ -1,0 +1,22 @@
+
+01-14-09 jamesr
+major rewrite of factory and related components
+added __setattr__ and __getattr__ attributes to node
+prettied up python output
+
+01-15-08
+remove extend function from helpers.py - not used
+prettied up doc strings in factory.py
+added comments to static attributes section
+fixed a problem with anonymous nodes in object graph
+added and built the view class (not tested, but reviewed)
+built out the node class (not tested, but reviewed)
+made a global compiled tag type that makes a module level global - must be under a class definition
+fixed the import tag - was broken
+updated the handler class to accept a delegate, like (node).constrain()
+added global tracker for outstanding nodes to init
+added global tracker for outstanding constraints to evaluate
+added proper event firing for nodes - 'early' 'init', (constraint), 'late' events are now globally tracked so that everything is made before events fire like it's supposed to be
+changed name of module helper.py to Helpers.py and have node import it
+changed name of factory.py to Factories.py
+removed parent = self.parent from tags. not necessary.

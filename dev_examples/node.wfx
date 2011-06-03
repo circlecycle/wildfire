@@ -1,0 +1,39 @@
+<application somenumber="667" testvalue="testvalue received">    
+    <handler on="init">
+        #self.somenumber = 444
+        print "outer inits fired"
+    </handler>
+    
+    <class name="printhi">
+        <handler on="init">
+            print "hi"
+        </handler>
+        
+        <method name="something">
+            return "something()"
+        </method>
+    </class>
+    
+    <node test="${application.testvalue}" nexttest="${application.test.somevalue}">
+        <handler on="init">
+            print "inner inits fired"
+        </handler>
+        
+        <handler on="late">
+            print "inner late fired"
+            self.foo()
+            print "test constraint:", self.test
+            print "next constraint:", self.nexttest
+        </handler>
+        
+        <method name="foo">
+            print "foo fired"
+            print application.test.something()
+        </method>
+    </node>
+    
+    <printhi name="test" somevalue="${application.somenumber}"/>
+</application>
+
+EOF
+hi
